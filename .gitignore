@@ -1,0 +1,19 @@
+# Ignorar archivos temporales y cachés
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/
+ENV/
+
+# Ignorar archivos de sistema
+.DS_Store
+.bash_history
+.ssh/
+.cache/
+
+# Ignorar directorio de almacenamiento (puede contener archivos grandes)
+storage/*
+!storage/.gitkeep
