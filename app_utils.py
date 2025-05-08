@@ -10,9 +10,12 @@ import os
 import psutil
 import signal
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import request, jsonify
 from jsonschema import validate, ValidationError, FormatChecker
+import traceback
+import re
+from typing import Dict, List, Any, Tuple, Optional, Union, Callable
 import config
 
 # Configurar logging
@@ -31,11 +34,26 @@ tasks_in_progress = {}
 # Lock para acceso seguro a tasks_in_progress
 tasks_lock = threading.Lock()
 
-# Flag para indicar si los workers deben detenerse
+# Flags para control de workers
 shutdown_flag = threading.Event()
+pause_flag = threading.Event()
 
 # Thread pool para procesamiento
 executor = None
+
+# Estadísticas y métricas
+worker_stats = {
+    'tasks_processed': 0,
+    'tasks_succeeded': 0,
+    'tasks_failed': 0,
+    'tasks_retried': 0,
+    'processing_time': 0.0,
+    'last_error': None,
+    'start_time': time.time()
+}
+
+# Lock para estadísticas
+stats_lock = threading.Lock()
 
 class TaskPriority:
     """Niveles de prioridad para tareas en la cola"""
@@ -199,6 +217,7 @@ def queue_task_wrapper(bypass_queue=False, priority=TaskPriority.NORMAL, max_ret
                             tasks_in_progress[job_id].update({
                                 "status": "error",
                                 "error": str(e),
+                                "error_trace": traceback.format_exc(),
                                 "completed_at": time.time()
                             })
                     
@@ -318,6 +337,63 @@ def is_recoverable_error(error):
     
     return any(pattern in error_str for pattern in recoverable_patterns)
 
+def process_task_with_timeout(task, timeout=None):
+    """
+    Procesa una tarea con timeout para evitar bloqueos
+    
+    Args:
+        task (dict): La tarea a procesar
+        timeout (int): Tiempo máximo en segundos para procesamiento
+    
+    Returns:
+        tuple: (éxito, resultado, error_info)
+    """
+    if timeout is None:
+        timeout = getattr(config, 'MAX_PROCESSING_TIME', 1800)
+    
+    result_container = []
+    error_container = []
+    
+    def target_function():
+        try:
+            # Extraer información de la tarea
+            job_id = task["job_id"]
+            function = task["function"]
+            data = task["data"]
+            
+            # Ejecutar la función
+            result = function(job_id, data)
+            result_container.append(result)
+        except Exception as e:
+            error_container.append(e)
+    
+    # Crear y ejecutar thread
+    thread = threading.Thread(target=target_function)
+    thread.daemon = True
+    thread.start()
+    thread.join(timeout)
+    
+    # Verificar si el thread terminó correctamente
+    if thread.is_alive():
+        # Timeout ocurrió
+        error_container.append(TimeoutError(f"Procesamiento excedió el tiempo máximo de {timeout} segundos"))
+        # No podemos terminar el thread en Python, pero marcamos la tarea como fallida
+        return False, None, {"error": f"Timeout después de {timeout} segundos", "recoverable": False}
+    
+    # Verificar resultado
+    if error_container:
+        # Error ocurrió
+        error = error_container[0]
+        recoverable = is_recoverable_error(error)
+        return False, None, {"error": str(error), "recoverable": recoverable}
+    
+    if result_container:
+        # Éxito
+        return True, result_container[0], None
+    
+    # Caso inesperado (ni error ni resultado)
+    return False, None, {"error": "Resultado inconsistente en procesamiento", "recoverable": False}
+
 def process_task(task):
     """
     Procesa una tarea de la cola.
@@ -351,8 +427,20 @@ def process_task(task):
         # Ejecutar la función de procesamiento
         start_time = time.time()
         
-        result, endpoint, status_code = function(job_id, data)
+        # Usar nuestro método con timeout para evitar bloqueos
+        success, result, error_info = process_task_with_timeout(task, max_time)
+        
+        if not success:
+            raise Exception(error_info.get("error", "Error desconocido en procesamiento"))
+        
+        result, endpoint, status_code = result
         processing_time = time.time() - start_time
+        
+        # Actualizar estadísticas globales
+        with stats_lock:
+            worker_stats['tasks_processed'] += 1
+            worker_stats['tasks_succeeded'] += 1
+            worker_stats['processing_time'] += processing_time
         
         # Actualizar estado de finalización exitosa
         with tasks_lock:
@@ -385,10 +473,20 @@ def process_task(task):
         recoverable = is_recoverable_error(e)
         max_retries = task.get("max_retries", 3)
         
+        # Actualizar estadísticas
+        with stats_lock:
+            worker_stats['tasks_processed'] += 1
+            worker_stats['tasks_failed'] += 1
+            worker_stats['last_error'] = str(e)
+        
         # Implementar lógica de reintentos para errores recuperables
         if recoverable and retry_count < max_retries:
             # Calcular delay para el reintento con backoff exponencial
             retry_delay = min(60, 2 ** retry_count)  # Máximo 60 segundos
+            
+            # Actualizar estadísticas
+            with stats_lock:
+                worker_stats['tasks_retried'] += 1
             
             # Actualizar estado para reintento
             with tasks_lock:
@@ -417,6 +515,7 @@ def process_task(task):
                     "status": "error",
                     "error": str(e),
                     "error_type": type(e).__name__,
+                    "error_trace": traceback.format_exc(),
                     "completed_at": time.time(),
                     "recoverable": recoverable
                 })
@@ -428,7 +527,7 @@ def process_task(task):
                 "status": "error",
                 "job_id": job_id,
                 "error": str(e),
-                "endpoint": request.path
+                "endpoint": request.path if hasattr(request, 'path') else None
             })
         
         return False, None, {
@@ -442,13 +541,37 @@ def worker_process():
     """
     logger.info("Procesador de cola iniciado")
     
+    # Registrar en estadísticas
+    worker_id = threading.current_thread().name
+    
     while not shutdown_flag.is_set():
         try:
+            # Verificar si estamos pausados
+            if pause_flag.is_set():
+                time.sleep(1)
+                continue
+                
             # Esperar hasta 1 segundo por una nueva tarea
             try:
                 priority, _, task = task_queue.get(timeout=1)
                 job_id = task["job_id"]
             except queue.Empty:
+                continue
+            
+            # Verificar si la tarea fue cancelada
+            with tasks_lock:
+                if job_id in tasks_in_progress and tasks_in_progress[job_id].get("status") == "cancelled":
+                    logger.info(f"Tarea {job_id} fue cancelada, saltando procesamiento")
+                    task_queue.task_done()
+                    continue
+            
+            # Verificar carga del sistema antes de procesar
+            if check_system_overload():
+                # Sistema sobrecargado, aplicar backpressure
+                logger.warning(f"Sistema sobrecargado, reencolando tarea {job_id}")
+                task_queue.put((priority + 1, time.time(), task))  # Reinsertar con prioridad menor
+                task_queue.task_done()
+                time.sleep(5)  # Esperar antes de tomar otra tarea
                 continue
             
             # Procesar la tarea
@@ -477,8 +600,35 @@ def worker_process():
             
         except Exception as e:
             logger.error(f"Error crítico en procesador de cola: {str(e)}", exc_info=True)
+            # Registrar en estadísticas
+            with stats_lock:
+                worker_stats['last_error'] = f"Error crítico en worker {worker_id}: {str(e)}"
             # Pequeña pausa antes de intentar nuevamente
             time.sleep(1)
+
+def check_system_overload():
+    """
+    Verifica si el sistema está sobrecargado para aplicar backpressure
+    
+    Returns:
+        bool: True si el sistema está sobrecargado
+    """
+    try:
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory_percent = psutil.virtual_memory().percent
+        
+        cpu_threshold = getattr(config, 'CPU_OVERLOAD_THRESHOLD', 90)
+        memory_threshold = getattr(config, 'MEMORY_OVERLOAD_THRESHOLD', 90)
+        
+        # Sistema considerado sobrecargado si CPU o memoria superan umbrales
+        if cpu_percent > cpu_threshold or memory_percent > memory_threshold:
+            logger.warning(f"Sistema sobrecargado: CPU {cpu_percent}%, Memoria {memory_percent}%")
+            return True
+            
+        return False
+    except Exception:
+        # En caso de error, asumir que no hay sobrecarga
+        return False
 
 def send_webhook(webhook_url, data, max_retries=3, retry_delay=2):
     """
@@ -496,7 +646,8 @@ def send_webhook(webhook_url, data, max_retries=3, retry_delay=2):
     def _send_webhook_async():
         headers = {
             'Content-Type': 'application/json',
-            'User-Agent': 'VideoAPI-Webhook/1.0'
+            'User-Agent': 'VideoAPI-Webhook/1.0',
+            'X-VideoAPI-Sent': datetime.now().isoformat()
         }
         
         for attempt in range(max_retries + 1):
@@ -571,6 +722,23 @@ def start_queue_processors(num_workers=4):
         max_workers = getattr(config, 'WORKER_PROCESSES', 4)
         num_workers = min(num_workers, max_workers)
     
+    # Inicializar estadísticas
+    global worker_stats
+    worker_stats = {
+        'tasks_processed': 0,
+        'tasks_succeeded': 0,
+        'tasks_failed': 0,
+        'tasks_retried': 0,
+        'processing_time': 0.0,
+        'last_error': None,
+        'start_time': time.time(),
+        'worker_count': num_workers
+    }
+    
+    # Resetear flags de control
+    shutdown_flag.clear()
+    pause_flag.clear()
+    
     # Crear thread pool
     executor = ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="QueueWorker")
     
@@ -579,6 +747,9 @@ def start_queue_processors(num_workers=4):
         executor.submit(worker_process)
     
     logger.info(f"Iniciados {num_workers} procesadores de cola")
+    
+    # Iniciar thread de monitoreo
+    threading.Thread(target=monitor_workers, daemon=True).start()
     
     # Registrar manejador de señales para shutdown limpio
     try:
@@ -598,6 +769,101 @@ def handle_shutdown(sig, frame):
         executor.shutdown(wait=True, cancel_futures=True)
     
     logger.info("Todos los workers detenidos correctamente")
+
+def monitor_workers():
+    """
+    Monitorea el estado de los workers y el sistema
+    """
+    logger.info("Iniciando monitoreo de workers")
+    
+    while not shutdown_flag.is_set():
+        try:
+            # Recolectar métricas del sistema
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory_percent = psutil.virtual_memory().percent
+            queue_size = task_queue.qsize()
+            
+            # Registrar métricas cada minuto
+            if worker_stats['tasks_processed'] > 0:
+                avg_processing_time = worker_stats['processing_time'] / worker_stats['tasks_processed']
+            else:
+                avg_processing_time = 0
+            
+            logger.info(
+                f"Estado del sistema: CPU {cpu_percent}%, Memoria {memory_percent}%, "
+                f"Cola: {queue_size}, Tareas procesadas: {worker_stats['tasks_processed']}, "
+                f"Tiempo medio: {avg_processing_time:.2f}s"
+            )
+            
+            # Verificar si necesitamos escalar workers
+            if should_adjust_workers():
+                adjust_workers()
+            
+            # Verificar tareas atascadas
+            check_stuck_tasks()
+            
+            # Verificar cada 60 segundos
+            time.sleep(60)
+            
+        except Exception as e:
+            logger.error(f"Error en monitoreo de workers: {str(e)}")
+            time.sleep(30)
+
+def should_adjust_workers():
+    """
+    Determina si se deben ajustar el número de workers
+    
+    Returns:
+        bool: True si se debe ajustar
+    """
+    try:
+        queue_size = task_queue.qsize()
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory_percent = psutil.virtual_memory().percent
+        
+        # Escalar si hay muchas tareas y recursos disponibles
+        if queue_size > 20 and cpu_percent < 70 and memory_percent < 80:
+            return True
+            
+        # Reducir si hay pocos trabajos y alta carga
+        if queue_size < 5 and (cpu_percent > 80 or memory_percent > 85):
+            return True
+            
+        return False
+    except:
+        return False
+
+def adjust_workers():
+    """
+    Ajusta el número de workers basado en carga y recursos
+    """
+    global executor
+    
+    # Actualmente no implementamos escalado dinámico una vez iniciado
+    # Se añadirá en una versión futura
+    pass
+
+def check_stuck_tasks():
+    """
+    Verifica y maneja tareas que podrían estar atascadas
+    """
+    current_time = time.time()
+    
+    with tasks_lock:
+        for job_id, task_info in list(tasks_in_progress.items()):
+            if task_info['status'] == 'processing':
+                # Verificar si la tarea lleva demasiado tiempo procesando
+                if 'started_at' in task_info:
+                    processing_time = current_time - task_info['started_at']
+                    max_time = getattr(config, 'MAX_PROCESSING_TIME', 1800)
+                    
+                    if processing_time > max_time * 1.5:  # 50% más del tiempo máximo
+                        logger.warning(f"Tarea {job_id} posiblemente atascada después de {processing_time:.1f}s")
+                        
+                        # En esta implementación no podemos detener tareas ya en ejecución
+                        # Solo actualizamos el estado para información
+                        task_info['possibly_stuck'] = True
+                        task_info['processing_time_warning'] = processing_time
 
 def stop_queue_processors():
     """
@@ -660,10 +926,17 @@ def get_job_status(job_id):
                 
                 status_copy['queue_position'] = queue_pos
                 
-                # Cálculo básico del tiempo estimado de espera
-                avg_processing_time = 30  # 30 segundos por defecto
-                status_copy['estimated_wait_seconds'] = queue_pos * avg_processing_time
-                status_copy['estimated_wait'] = format_time_seconds(status_copy['estimated_wait_seconds'])
+                # Cálculo dinámico del tiempo estimado de espera basado en stats
+                if worker_stats['tasks_processed'] > 0:
+                    avg_processing_time = worker_stats['processing_time'] / worker_stats['tasks_processed']
+                    worker_count = worker_stats['worker_count']
+                    status_copy['estimated_wait_seconds'] = (queue_pos / worker_count) * avg_processing_time
+                    status_copy['estimated_wait'] = format_time_seconds(status_copy['estimated_wait_seconds'])
+                else:
+                    # Si no hay estadísticas, usar un valor por defecto
+                    avg_processing_time = 30  # 30 segundos por defecto
+                    status_copy['estimated_wait_seconds'] = queue_pos * avg_processing_time
+                    status_copy['estimated_wait'] = format_time_seconds(status_copy['estimated_wait_seconds'])
             
             return status_copy
         else:
@@ -740,6 +1013,9 @@ def get_queue_stats():
         for priority, _, _ in queue_items:
             queue_by_priority[priority] = queue_by_priority.get(priority, 0) + 1
     
+    # Estadísticas de workers
+    worker_uptime = time.time() - worker_stats.get('start_time', time.time())
+    
     return {
         'total_tasks': total,
         'queue_size': task_queue.qsize(),
@@ -754,6 +1030,16 @@ def get_queue_stats():
         'system_load': {
             'cpu_percent': cpu_usage,
             'memory_percent': memory_usage
+        },
+        'worker_stats': {
+            'uptime_seconds': worker_uptime,
+            'uptime_formatted': format_time_seconds(worker_uptime),
+            'tasks_processed': worker_stats.get('tasks_processed', 0),
+            'tasks_succeeded': worker_stats.get('tasks_succeeded', 0),
+            'tasks_failed': worker_stats.get('tasks_failed', 0),
+            'tasks_retried': worker_stats.get('tasks_retried', 0),
+            'avg_processing_time': worker_stats.get('processing_time', 0) / max(1, worker_stats.get('tasks_processed', 1)),
+            'worker_count': worker_stats.get('worker_count', 0)
         },
         'timestamp': datetime.now().isoformat()
     }
@@ -807,53 +1093,36 @@ def pause_processing():
     """
     Pausa temporalmente el procesamiento de nuevas tareas (útil para mantenimiento)
     """
-    global executor
-    
-    if executor is None:
-        logger.warning("No hay procesadores de cola en ejecución.")
+    if pause_flag.is_set():
+        logger.warning("El procesamiento ya está pausado")
         return False
-    
-    # Señalizar a los workers que deben pausar
-    shutdown_flag.set()
-    
-    # Esperar a que terminen los workers actuales
-    executor.shutdown(wait=True, cancel_futures=True)
-    executor = None
-    
+        
+    pause_flag.set()
     logger.info("Procesamiento de cola pausado")
     return True
 
-def resume_processing(num_workers=None):
+def resume_processing():
     """
     Reanuda el procesamiento de tareas después de una pausa
     """
-    global executor
-    
-    if executor is not None:
-        logger.warning("Los procesadores de cola ya están en ejecución.")
+    if not pause_flag.is_set():
+        logger.warning("El procesamiento no está pausado")
         return False
-    
-    # Restablecer flag
-    shutdown_flag.clear()
-    
-    # Usar número de workers anterior o el especificado
-    if num_workers is None:
-        num_workers = getattr(config, 'WORKER_PROCESSES', 4)
-    
-    # Iniciar nuevos workers
-    start_queue_processors(num_workers)
-    
-    logger.info(f"Procesamiento de cola reanudado con {num_workers} workers")
+        
+    pause_flag.clear()
+    logger.info("Procesamiento de cola reanudado")
     return True
 
-def get_task_history(limit=100, status=None, endpoint=None):
+def get_task_history(limit=100, status=None, endpoint=None, order_by="created_at", order_desc=True):
     """
-    Obtiene el historial de tareas
+    Obtiene el historial de tareas con filtrado y ordenación mejorados
     
     Args:
         limit (int): Número máximo de tareas a retornar
         status (str): Filtrar por estado
         endpoint (str): Filtrar por endpoint
+        order_by (str): Campo para ordenación
+        order_desc (bool): Si es True, orden descendente
         
     Returns:
         list: Lista de tareas
@@ -873,8 +1142,106 @@ def get_task_history(limit=100, status=None, endpoint=None):
     if endpoint:
         all_tasks = [t for t in all_tasks if t.get('endpoint') == endpoint]
     
-    # Ordenar por tiempo de creación (más recientes primero)
-    all_tasks.sort(key=lambda x: x.get('created_at', 0), reverse=True)
+    # Validar campo de ordenación
+    valid_fields = ['created_at', 'started_at', 'completed_at', 'priority']
+    if order_by not in valid_fields:
+        order_by = 'created_at'
+    
+    # Ordenar tareas
+    def get_sort_key(task):
+        return task.get(order_by, 0)
+    
+    all_tasks.sort(key=get_sort_key, reverse=order_desc)
     
     # Limitar número de resultados
     return all_tasks[:limit]
+
+def add_queue_health_check():
+    """
+    Añade una tarea de health check a la cola para verificar que está funcionando
+    
+    Returns:
+        str: ID del job de health check
+    """
+    job_id = f"health_check_{uuid.uuid4()}"
+    
+    # Función simple para health check
+    def health_check_function(job_id, data):
+        return {"status": "healthy", "timestamp": time.time()}, "/health_check", 200
+    
+    # Añadir a la cola con alta prioridad
+    with tasks_lock:
+        tasks_in_progress[job_id] = {
+            "status": "queued",
+            "created_at": time.time(),
+            "endpoint": "/health_check",
+            "priority": TaskPriority.HIGH,
+            "max_retries": 0,
+            "retry_count": 0,
+            "is_health_check": True
+        }
+    
+    task_queue.put((
+        TaskPriority.HIGH,
+        time.time(),
+        {
+            "job_id": job_id,
+            "function": health_check_function,
+            "data": {},
+            "retry_count": 0,
+            "max_retries": 0,
+            "priority": TaskPriority.HIGH,
+            "created_at": time.time()
+        }
+    ))
+    
+    logger.debug(f"Health check añadido a cola: {job_id}")
+    return job_id
+
+def check_queue_health():
+    """
+    Verifica la salud de la cola realizando un health check
+    
+    Returns:
+        dict: Estado de salud de la cola
+    """
+    health_job_id = add_queue_health_check()
+    
+    # Esperar hasta 5 segundos por el resultado
+    wait_time = 0
+    interval = 0.5
+    max_wait = 5
+    
+    while wait_time < max_wait:
+        with tasks_lock:
+            if health_job_id in tasks_in_progress:
+                status = tasks_in_progress[health_job_id].get('status')
+                if status == 'completed':
+                    process_time = tasks_in_progress[health_job_id].get('processing_time', 0)
+                    return {
+                        "status": "healthy",
+                        "queue_processing": True,
+                        "response_time": process_time,
+                        "queue_size": task_queue.qsize(),
+                        "workers_active": worker_stats.get('worker_count', 0)
+                    }
+                elif status == 'error':
+                    return {
+                        "status": "degraded",
+                        "queue_processing": True,
+                        "error": tasks_in_progress[health_job_id].get('error', 'Unknown error'),
+                        "queue_size": task_queue.qsize(),
+                        "workers_active": worker_stats.get('worker_count', 0)
+                    }
+        
+        time.sleep(interval)
+        wait_time += interval
+    
+    # Si llegamos aquí, el health check no se completó a tiempo
+    return {
+        "status": "unhealthy",
+        "queue_processing": False,
+        "error": "Health check timed out - queue may be blocked",
+        "queue_size": task_queue.qsize(),
+        "workers_active": worker_stats.get('worker_count', 0)
+    }
