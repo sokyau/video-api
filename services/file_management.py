@@ -6,12 +6,14 @@ import tempfile
 import hashlib
 import socket
 import ipaddress
-import magic
 import time
 import shutil
+import mimetypes
+import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from typing import Optional, List, Tuple, Dict, Union, Any
+from concurrent.futures import ThreadPoolExecutor
 import config
 
 logger = logging.getLogger(__name__)
@@ -20,11 +22,61 @@ logger = logging.getLogger(__name__)
 MAX_DOWNLOAD_SIZE = getattr(config, 'MAX_DOWNLOAD_SIZE', 1024 * 1024 * 1024)  # 1GB por defecto
 DOWNLOAD_TIMEOUT = getattr(config, 'DOWNLOAD_TIMEOUT', 300)  # 5 minutos por defecto
 MAX_RETRIES = getattr(config, 'DOWNLOAD_MAX_RETRIES', 3)  # Número máximo de reintentos
+FILE_CACHE_DIR = getattr(config, 'FILE_CACHE_DIR', os.path.join(config.TEMP_DIR, 'cache'))
+CACHE_MAX_AGE = getattr(config, 'CACHE_MAX_AGE', 3600)  # 1 hora en segundos
+DOWNLOAD_CHUNK_SIZE = 8192  # 8KB por chunk, ajustable según la red
+
+# Crear directorio de caché si no existe
+os.makedirs(FILE_CACHE_DIR, exist_ok=True)
+
+# Lista de tipos MIME permitidos
 ALLOWED_MIME_TYPES = {
-    'video': ['video/mp4', 'video/avi', 'video/x-msvideo', 'video/quicktime', 'video/x-matroska', 'video/webm'],
-    'audio': ['audio/mpeg', 'audio/x-wav', 'audio/ogg', 'audio/flac', 'audio/aac', 'audio/mp4'],
-    'image': ['image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/webp']
+    'video': [
+        'video/mp4', 'video/x-msvideo', 'video/mpeg', 'video/quicktime', 
+        'video/x-matroska', 'video/webm', 'video/x-flv', 'video/3gpp'
+    ],
+    'audio': [
+        'audio/mpeg', 'audio/x-wav', 'audio/ogg', 'audio/flac', 'audio/aac', 
+        'audio/mp4', 'audio/x-m4a', 'audio/webm', 'audio/x-ms-wma'
+    ],
+    'image': [
+        'image/jpeg', 'image/png', 'image/gif', 'image/bmp', 'image/webp', 
+        'image/tiff', 'image/svg+xml', 'image/x-icon'
+    ],
+    'document': [
+        'application/pdf', 'text/plain', 'application/json', 'text/html',
+        'text/xml', 'application/xml', 'application/x-subrip', 'text/vtt'
+    ]
 }
+
+# Lista de dominios para redes privadas/locales
+PRIVATE_NETWORK_PATTERNS = [
+    r'^10\.\d+\.\d+\.\d+$',           # 10.0.0.0/8
+    r'^172\.(1[6-9]|2[0-9]|3[0-1])\.\d+\.\d+$',  # 172.16.0.0/12
+    r'^192\.168\.\d+\.\d+$',          # 192.168.0.0/16
+    r'^127\.\d+\.\d+\.\d+$',          # 127.0.0.0/8
+    r'^169\.254\.\d+\.\d+$',          # 169.254.0.0/16
+    r'^fc00:',                        # fc00::/7
+    r'^fe80:',                        # fe80::/10
+    r'^::1$',                         # localhost
+    r'^[fF][dD]',                     # fd00::/8
+]
+
+# Cache de archivos en memoria (hash -> ruta)
+file_cache = {}
+file_cache_lock = threading.RLock()
+
+class FileValidationError(Exception):
+    """Excepción para errores de validación de archivos"""
+    pass
+
+class DownloadError(Exception):
+    """Excepción para errores de descarga"""
+    pass
+
+class URLValidationError(Exception):
+    """Excepción para errores de validación de URL"""
+    pass
 
 def validate_url(url: str) -> str:
     """
@@ -37,46 +89,160 @@ def validate_url(url: str) -> str:
         str: URL validada
         
     Raises:
-        ValueError: Si la URL no es válida o potencialmente peligrosa
+        URLValidationError: Si la URL no es válida o potencialmente peligrosa
     """
     try:
         # Validar formato básico
-        parsed_url = urlparse(url)
+        if not isinstance(url, str) or not url:
+            raise URLValidationError("La URL no puede estar vacía o no ser una cadena de texto")
+            
+        # Decodificar URL para evitar evasión de filtros
+        decoded_url = unquote(url)
         
         # Verificar esquema
+        parsed_url = urlparse(decoded_url)
+        
         if parsed_url.scheme not in ['http', 'https']:
-            raise ValueError(f"Esquema de URL no permitido: {parsed_url.scheme}. Solo se permiten http y https.")
+            raise URLValidationError(f"Esquema de URL no permitido: {parsed_url.scheme}. Solo se permiten http y https.")
             
         # Verificar que contiene hostname
         if not parsed_url.netloc:
-            raise ValueError("URL inválida: falta hostname")
-            
-        # Verificar que no es una IP interna/privada
-        hostname = parsed_url.netloc.split(':')[0]  # Eliminar puerto si existe
+            raise URLValidationError("URL inválida: falta hostname")
         
-        # Verificar si es una dirección IP
+        # Extraer hostname limpio (eliminar puerto si existe)
+        hostname = parsed_url.netloc.split(':')[0]
+        
+        # Verificar formatos no permitidos
+        disallowed_hostnames = [
+            'localhost', '127.0.0.1', '0.0.0.0', '::1',
+            '[::1]', '[0:0:0:0:0:0:0:1]'
+        ]
+        
+        if hostname.lower() in disallowed_hostnames:
+            raise URLValidationError(f"Hostname no permitido: {hostname}")
+        
+        # Verificar direcciones IP locales/privadas
         try:
             ip = ipaddress.ip_address(hostname)
-            # Verificar si es una IP privada, loopback, link-local, etc.
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
-                raise ValueError(f"No se permite acceder a redes privadas/internas: {hostname}")
+                raise URLValidationError(f"No se permite acceder a redes privadas/internas: {hostname}")
         except ValueError:
             # No es una IP, intentar resolver el hostname
             try:
-                ip_address = socket.gethostbyname(hostname)
-                ip = ipaddress.ip_address(ip_address)
-                if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
-                    raise ValueError(f"El hostname {hostname} resuelve a una IP privada/interna: {ip_address}")
+                # Verificar patrones de redes privadas conocidos
+                for pattern in PRIVATE_NETWORK_PATTERNS:
+                    if re.match(pattern, hostname):
+                        raise URLValidationError(f"Hostname con patrón de red privada no permitido: {hostname}")
+                
+                # Resolver dominio a IP
+                ip_addresses = socket.getaddrinfo(hostname, None)
+                
+                for family, _, _, _, sockaddr in ip_addresses:
+                    # Extraer IP del sockaddr
+                    if family == socket.AF_INET:
+                        ip_str = sockaddr[0]
+                    elif family == socket.AF_INET6:
+                        ip_str = sockaddr[0]
+                    else:
+                        continue
+                    
+                    ip = ipaddress.ip_address(ip_str)
+                    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+                        raise URLValidationError(f"El hostname {hostname} resuelve a una IP privada/interna: {ip_str}")
+            
             except socket.gaierror:
-                logger.warning(f"No se pudo resolver el hostname: {hostname}")
-                # Continuamos, ya que puede ser un error temporal o un dominio que no existe
+                # No se pudo resolver, es posible que el dominio no exista
+                # No bloqueamos, ya que la conexión fallará más tarde
+                logger.warning(f"No se pudo resolver hostname: {hostname}")
+        
+        # Verificar caracteres sospechosos
+        suspicious_chars = ['@', '..', '\\', '\r', '\n', '\t', '\0']
+        if any(char in decoded_url for char in suspicious_chars):
+            raise URLValidationError(f"URL contiene caracteres sospechosos: {decoded_url}")
         
         # URL parece segura
         return url
         
+    except URLValidationError as e:
+        # Reenviar excepción específica
+        raise
     except Exception as e:
         logger.error(f"Error validando URL {url}: {str(e)}")
-        raise ValueError(f"URL inválida o insegura: {str(e)}")
+        raise URLValidationError(f"URL inválida o insegura: {str(e)}")
+
+def generate_cache_key(url: str) -> str:
+    """
+    Genera una clave de caché única para una URL
+    
+    Args:
+        url (str): URL para la que generar clave
+    
+    Returns:
+        str: Clave de caché (hash SHA-256)
+    """
+    return hashlib.sha256(url.encode('utf-8')).hexdigest()
+
+def get_cached_file(url: str) -> Optional[str]:
+    """
+    Intenta obtener un archivo de la caché
+    
+    Args:
+        url (str): URL del archivo
+    
+    Returns:
+        Optional[str]: Ruta al archivo en caché, o None si no está cacheado
+    """
+    cache_key = generate_cache_key(url)
+    
+    with file_cache_lock:
+        # Verificar en memoria
+        if cache_key in file_cache:
+            file_path = file_cache[cache_key]
+            
+            # Verificar que el archivo aún existe
+            if os.path.exists(file_path):
+                # Verificar que no es demasiado viejo
+                mtime = os.path.getmtime(file_path)
+                if time.time() - mtime <= CACHE_MAX_AGE:
+                    logger.debug(f"Archivo cacheado encontrado para {url}")
+                    return file_path
+                else:
+                    # Archivo expirado, eliminar de caché
+                    logger.debug(f"Archivo cacheado expirado para {url}")
+                    del file_cache[cache_key]
+                    try:
+                        os.remove(file_path)
+                    except:
+                        pass
+            else:
+                # Archivo no encontrado, eliminar de caché
+                del file_cache[cache_key]
+    
+    # No encontrado en caché o expirado
+    return None
+
+def cache_file(url: str, file_path: str) -> None:
+    """
+    Añade un archivo a la caché
+    
+    Args:
+        url (str): URL del archivo
+        file_path (str): Ruta al archivo local
+    """
+    cache_key = generate_cache_key(url)
+    
+    with file_cache_lock:
+        # Generar nombre en caché
+        cache_filename = f"{cache_key}{get_file_extension(file_path)}"
+        cache_path = os.path.join(FILE_CACHE_DIR, cache_filename)
+        
+        # Copiar archivo a la caché
+        try:
+            shutil.copy2(file_path, cache_path)
+            file_cache[cache_key] = cache_path
+            logger.debug(f"Archivo añadido a caché: {url} -> {cache_path}")
+        except Exception as e:
+            logger.error(f"Error cacheando archivo {url}: {str(e)}")
 
 def generate_temp_filename(prefix: str = "", suffix: str = "") -> str:
     """
@@ -96,9 +262,10 @@ def generate_temp_filename(prefix: str = "", suffix: str = "") -> str:
 def download_file(url: str, target_dir: Optional[str] = None, 
                   filename: Optional[str] = None, 
                   max_size: Optional[int] = None,
-                  validate_mime: bool = True) -> str:
+                  validate_mime: bool = True,
+                  use_cache: bool = True) -> str:
     """
-    Descarga un archivo desde una URL con validación mejorada y control de tamaño
+    Descarga un archivo desde una URL con validación y caché
     
     Args:
         url (str): URL del archivo a descargar
@@ -106,16 +273,40 @@ def download_file(url: str, target_dir: Optional[str] = None,
         filename (str, optional): Nombre personalizado para el archivo
         max_size (int, optional): Tamaño máximo permitido en bytes
         validate_mime (bool): Si se debe validar el tipo MIME del archivo
+        use_cache (bool): Si se debe usar/actualizar la caché
     
     Returns:
         str: Ruta al archivo descargado
     
     Raises:
-        ValueError: Si el archivo excede el tamaño máximo o el tipo MIME no es válido
-        requests.RequestException: Si ocurre un error durante la descarga
+        DownloadError: Si ocurre un error durante la descarga
+        FileValidationError: Si el archivo no pasa la validación
+        URLValidationError: Si la URL no es válida
     """
     # Validar URL para prevenir SSRF
-    url = validate_url(url)
+    try:
+        url = validate_url(url)
+    except URLValidationError as e:
+        logger.error(f"URL inválida: {url} - {str(e)}")
+        raise
+        
+    # Intentar obtener de caché si está habilitado
+    if use_cache:
+        cached_path = get_cached_file(url)
+        if cached_path:
+            logger.info(f"Usando archivo cacheado para {url}")
+            
+            # Si se especifica un directorio de destino distinto a la caché
+            if target_dir and target_dir != FILE_CACHE_DIR:
+                # Copiar a ubicación solicitada
+                if filename is None:
+                    filename = os.path.basename(cached_path)
+                
+                target_path = os.path.join(target_dir, filename)
+                shutil.copy2(cached_path, target_path)
+                return target_path
+            
+            return cached_path
     
     if target_dir is None:
         target_dir = config.TEMP_DIR
@@ -161,25 +352,25 @@ def download_file(url: str, target_dir: Optional[str] = None,
                 # Verificar Content-Length si está disponible
                 content_length = response.headers.get('Content-Length')
                 if content_length and int(content_length) > max_size:
-                    raise ValueError(f"El archivo es demasiado grande: {int(content_length)} bytes (máximo: {max_size} bytes)")
+                    raise FileValidationError(f"El archivo es demasiado grande: {int(content_length)} bytes (máximo: {max_size} bytes)")
                 
                 # Verificar Content-Type si validate_mime es True
                 if validate_mime:
                     content_type = response.headers.get('Content-Type', '')
                     if not is_valid_content_type(content_type):
-                        raise ValueError(f"Tipo de contenido no permitido: {content_type}")
+                        raise FileValidationError(f"Tipo de contenido no permitido: {content_type}")
                 
                 downloaded_size = 0
                 start_time = time.time()
                 
                 with open(temp_file_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                         if chunk:
                             downloaded_size += len(chunk)
                             if downloaded_size > max_size:
                                 f.close()
                                 os.remove(temp_file_path)
-                                raise ValueError(f"Archivo demasiado grande (límite: {max_size} bytes)")
+                                raise FileValidationError(f"Archivo demasiado grande (límite: {max_size} bytes)")
                             f.write(chunk)
                 
                 # Verificar el tipo MIME real del archivo
@@ -187,7 +378,7 @@ def download_file(url: str, target_dir: Optional[str] = None,
                     detected_mime = detect_mime_type(temp_file_path)
                     if not is_valid_content_type(detected_mime):
                         os.remove(temp_file_path)
-                        raise ValueError(f"Tipo de archivo no permitido: {detected_mime}")
+                        raise FileValidationError(f"Tipo de archivo no permitido: {detected_mime}")
                 
                 # Si todo está bien, mover el archivo temporal al destino final
                 shutil.move(temp_file_path, file_path)
@@ -195,7 +386,11 @@ def download_file(url: str, target_dir: Optional[str] = None,
                 download_time = time.time() - start_time
                 download_speed = downloaded_size / (download_time * 1024)  # KB/s
                 
-                logger.info(f"Archivo descargado exitosamente: {url} -> {file_path} ({downloaded_size/1024:.2f} KB, {download_speed:.2f} KB/s)")
+                logger.info(f"Archivo descargado: {url} -> {file_path} ({downloaded_size/1024:.2f} KB, {download_speed:.2f} KB/s)")
+                
+                # Cachar archivo si la característica está habilitada
+                if use_cache and downloaded_size > 0:
+                    cache_file(url, file_path)
                 
                 return file_path
         
@@ -209,11 +404,23 @@ def download_file(url: str, target_dir: Optional[str] = None,
             
             if retry_count >= MAX_RETRIES:
                 logger.error(f"Falló la descarga después de {MAX_RETRIES} intentos: {url}")
-                raise
+                raise DownloadError(f"Error descargando archivo después de {MAX_RETRIES} intentos: {str(e)}")
             
             # Esperar antes de reintentar con backoff exponencial
             time.sleep(2 ** retry_count)
         
+        except FileValidationError as e:
+            # Pasar la excepción de validación
+            logger.error(f"Error de validación para {url}: {str(e)}")
+            
+            # Limpiar archivos parciales
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            raise
+            
         except Exception as e:
             logger.error(f"Error descargando archivo desde {url}: {str(e)}")
             
@@ -223,7 +430,59 @@ def download_file(url: str, target_dir: Optional[str] = None,
             if os.path.exists(file_path):
                 os.remove(file_path)
             
-            raise
+            raise DownloadError(f"Error descargando archivo: {str(e)}")
+
+def download_files_batch(urls: List[str], target_dir: Optional[str] = None, 
+                         validate_mime: bool = True, max_workers: int = 4) -> List[str]:
+    """
+    Descarga múltiples archivos en paralelo
+    
+    Args:
+        urls (list): Lista de URLs para descargar
+        target_dir (str, optional): Directorio destino
+        validate_mime (bool): Si se debe validar el tipo MIME
+        max_workers (int): Número máximo de workers para descargas paralelas
+        
+    Returns:
+        list: Lista de rutas a los archivos descargados
+    """
+    if target_dir is None:
+        target_dir = config.TEMP_DIR
+    
+    ensure_directory(target_dir)
+    
+    # Ajustar número de workers según la cantidad de archivos
+    if max_workers > len(urls):
+        max_workers = len(urls)
+    
+    downloaded_files = []
+    failed_downloads = []
+    
+    # Función para descargar un archivo y manejar excepciones
+    def download_single_file(url):
+        try:
+            return download_file(url, target_dir, validate_mime=validate_mime)
+        except Exception as e:
+            logger.error(f"Error descargando archivo batch {url}: {str(e)}")
+            failed_downloads.append((url, str(e)))
+            return None
+    
+    # Descargar archivos en paralelo
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        results = list(executor.map(download_single_file, urls))
+    
+    # Filtrar resultados exitosos
+    downloaded_files = [path for path in results if path is not None]
+    
+    # Registrar estadísticas
+    success_count = len(downloaded_files)
+    fail_count = len(failed_downloads)
+    logger.info(f"Descarga batch completada: {success_count} éxitos, {fail_count} fallos")
+    
+    if failed_downloads:
+        logger.warning(f"Fallaron {fail_count} descargas de {len(urls)}. Primer error: {failed_downloads[0][1]}")
+    
+    return downloaded_files
 
 def detect_mime_type(file_path: str) -> str:
     """
@@ -236,18 +495,43 @@ def detect_mime_type(file_path: str) -> str:
         str: Tipo MIME del archivo
     """
     try:
-        mime = magic.Magic(mime=True)
-        return mime.from_file(file_path)
+        # Intentar detectar por contenido (necesita python-magic)
+        try:
+            import magic
+            mime = magic.Magic(mime=True)
+            return mime.from_file(file_path)
+        except (ImportError, AttributeError):
+            # Fallback a mimetypes si python-magic no está disponible
+            content_type, _ = mimetypes.guess_type(file_path)
+            if content_type:
+                return content_type
+            
+            # Detección básica por extensión
+            ext = get_file_extension(file_path).lower()
+            mime_mapping = {
+                '.mp4': 'video/mp4',
+                '.avi': 'video/x-msvideo',
+                '.mov': 'video/quicktime',
+                '.mkv': 'video/x-matroska',
+                '.webm': 'video/webm',
+                '.mp3': 'audio/mpeg',
+                '.wav': 'audio/x-wav',
+                '.ogg': 'audio/ogg',
+                '.flac': 'audio/flac',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.srt': 'application/x-subrip',
+                '.vtt': 'text/vtt',
+            }
+            return mime_mapping.get(ext, 'application/octet-stream')
+    
     except Exception as e:
         logger.error(f"Error detectando tipo MIME: {str(e)}")
-        # Fallback a detección por extensión
-        ext = get_file_extension(file_path)
-        if ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm']:
-            return 'video/mp4'
-        elif ext in ['.mp3', '.wav', '.ogg', '.flac']:
-            return 'audio/mpeg'
-        elif ext in ['.jpg', '.jpeg', '.png', '.gif', '.webp']:
-            return 'image/jpeg'
         return 'application/octet-stream'
 
 def is_valid_content_type(content_type: str) -> bool:
@@ -260,6 +544,9 @@ def is_valid_content_type(content_type: str) -> bool:
     Returns:
         bool: True si es permitido, False en caso contrario
     """
+    if not content_type:
+        return False
+        
     # Lista completa de tipos permitidos
     all_allowed_types = []
     for category in ALLOWED_MIME_TYPES.values():
@@ -269,9 +556,13 @@ def is_valid_content_type(content_type: str) -> bool:
     if not all_allowed_types:
         return True
     
+    # Normalizar content_type (eliminar parámetros)
+    if ';' in content_type:
+        content_type = content_type.split(';')[0].strip()
+    
     # Verificar contra la lista de tipos permitidos
     for allowed_type in all_allowed_types:
-        if content_type.startswith(allowed_type):
+        if content_type.lower() == allowed_type.lower() or content_type.lower().startswith(allowed_type.lower() + '+'):
             return True
     
     return False
@@ -286,33 +577,55 @@ def get_extension_from_content_type(content_type: str) -> str:
     Returns:
         str: Extensión de archivo con punto o cadena vacía si no se reconoce
     """
+    if ';' in content_type:
+        content_type = content_type.split(';')[0].strip()
+        
     mime_to_ext = {
         'video/mp4': '.mp4',
         'video/x-msvideo': '.avi',
         'video/quicktime': '.mov',
         'video/x-matroska': '.mkv',
         'video/webm': '.webm',
+        'video/3gpp': '.3gp',
+        'video/x-flv': '.flv',
         'audio/mpeg': '.mp3',
         'audio/x-wav': '.wav',
+        'audio/wav': '.wav',
         'audio/ogg': '.ogg',
         'audio/flac': '.flac',
         'audio/aac': '.aac',
         'audio/mp4': '.m4a',
+        'audio/x-m4a': '.m4a',
+        'audio/webm': '.weba',
         'image/jpeg': '.jpg',
         'image/png': '.png',
         'image/gif': '.gif',
         'image/bmp': '.bmp',
-        'image/webp': '.webp'
+        'image/webp': '.webp',
+        'image/svg+xml': '.svg',
+        'application/pdf': '.pdf',
+        'text/plain': '.txt',
+        'application/x-subrip': '.srt',
+        'text/vtt': '.vtt',
+        'application/json': '.json',
+        'text/html': '.html',
+        'text/xml': '.xml',
+        'application/xml': '.xml'
     }
     
     # Buscar tipo exacto
-    if content_type in mime_to_ext:
-        return mime_to_ext[content_type]
+    if content_type.lower() in mime_to_ext:
+        return mime_to_ext[content_type.lower()]
     
     # Buscar tipo parcial
     for mime, ext in mime_to_ext.items():
-        if content_type.startswith(mime):
+        if content_type.lower().startswith(mime.lower()):
             return ext
+    
+    # Usar mimetypes como fallback
+    ext = mimetypes.guess_extension(content_type)
+    if ext:
+        return ext
     
     return ''
 
@@ -396,7 +709,7 @@ def is_video_file(file_path: str) -> bool:
         bool: True si es un archivo de video, False en caso contrario
     """
     # Verificar por extensión primero (más rápido)
-    video_extensions = ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.webm']
+    video_extensions = ['.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv', '.webm', '.3gp']
     ext = get_file_extension(file_path)
     
     if ext in video_extensions:
@@ -420,7 +733,7 @@ def is_audio_file(file_path: str) -> bool:
     Returns:
         bool: True si es un archivo de audio, False en caso contrario
     """
-    audio_extensions = ['.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a']
+    audio_extensions = ['.mp3', '.wav', '.ogg', '.flac', '.aac', '.m4a', '.wma']
     ext = get_file_extension(file_path)
     
     if ext in audio_extensions:
@@ -443,7 +756,7 @@ def is_image_file(file_path: str) -> bool:
     Returns:
         bool: True si es un archivo de imagen, False en caso contrario
     """
-    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']
+    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico']
     ext = get_file_extension(file_path)
     
     if ext in image_extensions:
@@ -456,13 +769,14 @@ def is_image_file(file_path: str) -> bool:
     except Exception:
         return False
 
-def calculate_file_hash(file_path: str, algorithm: str = 'sha256') -> str:
+def calculate_file_hash(file_path: str, algorithm: str = 'sha256', block_size: int = 65536) -> str:
     """
-    Calcula el hash de un archivo
+    Calcula el hash de un archivo de manera eficiente
     
     Args:
         file_path (str): Ruta al archivo
         algorithm (str): Algoritmo de hash (md5, sha1, sha256)
+        block_size (int): Tamaño de bloque para lectura
     
     Returns:
         str: Hash del archivo en formato hexadecimal
@@ -473,7 +787,8 @@ def calculate_file_hash(file_path: str, algorithm: str = 'sha256') -> str:
     hash_algorithms = {
         'md5': hashlib.md5,
         'sha1': hashlib.sha1,
-        'sha256': hashlib.sha256
+        'sha256': hashlib.sha256,
+        'sha512': hashlib.sha512
     }
     
     if algorithm not in hash_algorithms:
@@ -482,7 +797,7 @@ def calculate_file_hash(file_path: str, algorithm: str = 'sha256') -> str:
     hash_func = hash_algorithms[algorithm]()
     
     with open(file_path, 'rb') as f:
-        for chunk in iter(lambda: f.read(4096), b''):
+        for chunk in iter(lambda: f.read(block_size), b''):
             hash_func.update(chunk)
     
     return hash_func.hexdigest()
@@ -513,6 +828,16 @@ def get_file_info(file_path: str) -> Dict[str, Any]:
         file_type = 'audio'
     elif mime_type.startswith('image/'):
         file_type = 'image'
+    elif mime_type.startswith('text/') or mime_type == 'application/pdf':
+        file_type = 'document'
+    
+    # Calcular hash para archivos pequeños (<100MB)
+    file_hash = None
+    if file_stat.st_size < 100 * 1024 * 1024:
+        try:
+            file_hash = calculate_file_hash(file_path, algorithm='sha256')
+        except Exception as e:
+            logger.warning(f"No se pudo calcular hash para {file_path}: {str(e)}")
     
     return {
         'path': file_path,
@@ -523,7 +848,8 @@ def get_file_info(file_path: str) -> Dict[str, Any]:
         'modified': file_stat.st_mtime,
         'mime_type': mime_type,
         'type': file_type,
-        'extension': get_file_extension(file_path)
+        'extension': get_file_extension(file_path),
+        'hash_sha256': file_hash
     }
 
 def format_size(size_bytes: int) -> str:
@@ -592,6 +918,10 @@ def cleanup_temp_files(max_age_hours: int = 24, directory: Optional[str] = None)
             # Ignorar directorios
             if os.path.isdir(file_path):
                 continue
+            
+            # Ignorar archivos especiales
+            if filename.startswith('.'):
+                continue
                 
             # Verificar edad del archivo
             try:
@@ -608,38 +938,6 @@ def cleanup_temp_files(max_age_hours: int = 24, directory: Optional[str] = None)
         logger.info(f"Limpieza: eliminados {files_removed} archivos ({bytes_freed/1024/1024:.2f} MB)")
     
     return files_removed, bytes_freed
-
-def download_files_batch(urls: List[str], target_dir: Optional[str] = None) -> List[str]:
-    """
-    Descarga múltiples archivos en paralelo
-    
-    Args:
-        urls (list): Lista de URLs para descargar
-        target_dir (str, optional): Directorio destino
-    
-    Returns:
-        list: Lista de rutas a los archivos descargados
-    """
-    if target_dir is None:
-        target_dir = config.TEMP_DIR
-    
-    ensure_directory(target_dir)
-    
-    downloaded_files = []
-    failed_downloads = []
-    
-    for url in urls:
-        try:
-            file_path = download_file(url, target_dir)
-            downloaded_files.append(file_path)
-        except Exception as e:
-            logger.error(f"Error descargando archivo batch {url}: {str(e)}")
-            failed_downloads.append(url)
-    
-    if failed_downloads:
-        logger.warning(f"Fallaron {len(failed_downloads)} descargas de {len(urls)}")
-    
-    return downloaded_files
 
 def verify_file_integrity(file_path: str, expected_hash: Optional[str] = None, algorithm: str = 'sha256') -> bool:
     """
@@ -678,3 +976,34 @@ def verify_file_integrity(file_path: str, expected_hash: Optional[str] = None, a
     except Exception as e:
         logger.error(f"Error verificando integridad del archivo {file_path}: {str(e)}")
         return False
+
+def cleanup_cache(max_age_hours: int = 24) -> Tuple[int, int]:
+    """
+    Limpia archivos de caché antiguos
+    
+    Args:
+        max_age_hours (int): Edad máxima en horas
+    
+    Returns:
+        tuple: (Número de archivos eliminados, Bytes liberados)
+    """
+    # Llamar a cleanup_temp_files con el directorio de caché
+    return cleanup_temp_files(max_age_hours, FILE_CACHE_DIR)
+
+# Inicialización del módulo
+def init_module():
+    """Inicializa el módulo"""
+    # Asegurar directorio de caché
+    os.makedirs(FILE_CACHE_DIR, exist_ok=True)
+    
+    # Inicializar tipos MIME
+    mimetypes.init()
+    
+    # Agregar tipos MIME adicionales
+    mimetypes.add_type('application/x-subrip', '.srt')
+    mimetypes.add_type('text/vtt', '.vtt')
+    
+    logger.info(f"Módulo file_management inicializado. Directorio caché: {FILE_CACHE_DIR}")
+
+# Inicializar al importar
+init_module()
