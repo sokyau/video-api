@@ -1,0 +1,1608 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Video Processing API",
+    "description": "API para procesamiento de video optimizada para creación de contenido",
+    "version": "1.0.0",
+    "contact": {
+      "name": "VideoAPI Support",
+      "email": "support@sofe.site"
+    }
+  },
+  "servers": [
+    {
+      "url": "https://videoapi.sofe.site",
+      "description": "Servidor de producción"
+    },
+    {
+      "url": "http://localhost:8080",
+      "description": "Servidor de desarrollo"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "error"
+          },
+          "error": {
+            "type": "string",
+            "example": "Internal Server Error"
+          },
+          "message": {
+            "type": "string",
+            "example": "Ocurrió un error inesperado en el servidor"
+          }
+        }
+      },
+      "JobResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "queued"
+          },
+          "job_id": {
+            "type": "string",
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "message": {
+            "type": "string",
+            "example": "Task has been queued for processing"
+          }
+        }
+      },
+      "JobStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "job_id": {
+            "type": "string",
+            "example": "550e8400-e29b-41d4-a716-446655440000"
+          },
+          "job_status": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "example": "completed"
+              },
+              "created_at": {
+                "type": "number",
+                "example": 1641377400.34
+              },
+              "completed_at": {
+                "type": "number",
+                "example": 1641377430.12
+              },
+              "result": {
+                "type": "string",
+                "example": "https://videoapi.sofe.site/storage/abc123.mp4"
+              }
+            }
+          }
+        }
+      },
+      "VersionInfo": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "string",
+            "example": "1.0.0"
+          },
+          "api_version": {
+            "type": "string",
+            "example": "v1"
+          },
+          "build_date": {
+            "type": "string",
+            "example": "2025-05-06"
+          },
+          "python_version": {
+            "type": "string",
+            "example": "3.9.5"
+          },
+          "platform": {
+            "type": "string",
+            "example": "Linux-5.4.0-x86_64"
+          }
+        }
+      },
+      "HealthStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "healthy"
+          },
+          "checks": {
+            "type": "object",
+            "properties": {
+              "storage": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "example": "ok"
+                  }
+                }
+              },
+              "ffmpeg": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "example": "ok"
+                  },
+                  "version": {
+                    "type": "string",
+                    "example": "ffmpeg version 4.4.2"
+                  }
+                }
+              },
+              "disk": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "example": "ok"
+                  },
+                  "total_gb": {
+                    "type": "number",
+                    "example": 150
+                  },
+                  "free_gb": {
+                    "type": "number",
+                    "example": 75.5
+                  },
+                  "used_percent": {
+                    "type": "number",
+                    "example": 49.7
+                  }
+                }
+              },
+              "queue": {
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "example": "ok"
+                  },
+                  "stats": {
+                    "type": "object",
+                    "properties": {
+                      "total_tasks": {
+                        "type": "integer",
+                        "example": 10
+                      },
+                      "queue_size": {
+                        "type": "integer",
+                        "example": 2
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "uptime": {
+            "type": "number",
+            "example": 86400
+          },
+          "uptime_formatted": {
+            "type": "string",
+            "example": "1 día, 0 horas, 0 minutos, 0 segundos"
+          }
+        }
+      },
+      "MetricsResponse": {
+        "type": "object",
+        "properties": {
+          "system": {
+            "type": "object",
+            "properties": {
+              "cpu_usage_percent": {
+                "type": "number",
+                "example": 45.2
+              },
+              "memory_used_percent": {
+                "type": "number",
+                "example": 60.5
+              },
+              "disk_used_percent": {
+                "type": "number",
+                "example": 49.7
+              },
+              "uptime_seconds": {
+                "type": "number",
+                "example": 86400
+              }
+            }
+          },
+          "storage": {
+            "type": "object",
+            "properties": {
+              "file_count": {
+                "type": "integer",
+                "example": 120
+              },
+              "size_mb": {
+                "type": "number",
+                "example": 1540.25
+              }
+            }
+          },
+          "queue": {
+            "type": "object",
+            "properties": {
+              "total_tasks": {
+                "type": "integer",
+                "example": 10
+              },
+              "queue_size": {
+                "type": "integer",
+                "example": 2
+              },
+              "tasks_by_status": {
+                "type": "object",
+                "properties": {
+                  "queued": {
+                    "type": "integer",
+                    "example": 2
+                  },
+                  "processing": {
+                    "type": "integer",
+                    "example": 1
+                  },
+                  "completed": {
+                    "type": "integer",
+                    "example": 6
+                  },
+                  "error": {
+                    "type": "integer",
+                    "example": 1
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "CleanupResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "success"
+          },
+          "files_removed": {
+            "type": "integer",
+            "example": 15
+          },
+          "space_freed_mb": {
+            "type": "number",
+            "example": 256.34
+          }
+        }
+      },
+      "MemeOverlayRequest": {
+        "type": "object",
+        "required": ["video_url", "meme_url"],
+        "properties": {
+          "video_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/video.mp4"
+          },
+          "meme_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/meme.png"
+          },
+          "position": {
+            "type": "string",
+            "enum": ["top", "bottom", "left", "right", "top_left", "top_right", "bottom_left", "bottom_right", "center"],
+            "default": "bottom",
+            "example": "bottom"
+          },
+          "scale": {
+            "type": "number",
+            "minimum": 0.1,
+            "maximum": 1.0,
+            "default": 0.3,
+            "example": 0.3
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      },
+      "CaptionVideoRequest": {
+        "type": "object",
+        "required": ["video_url", "subtitles_url"],
+        "properties": {
+          "video_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/video.mp4"
+          },
+          "subtitles_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/subtitles.srt"
+          },
+          "font": {
+            "type": "string",
+            "default": "Arial",
+            "example": "Arial"
+          },
+          "font_size": {
+            "type": "integer",
+            "minimum": 12,
+            "maximum": 72,
+            "default": 24,
+            "example": 24
+          },
+          "font_color": {
+            "type": "string",
+            "default": "white",
+            "example": "white"
+          },
+          "background": {
+            "type": "boolean",
+            "default": true,
+            "example": true
+          },
+          "position": {
+            "type": "string",
+            "enum": ["bottom", "top"],
+            "default": "bottom",
+            "example": "bottom"
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      },
+      "ConcatenateRequest": {
+        "type": "object",
+        "required": ["video_urls"],
+        "properties": {
+          "video_urls": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uri"
+            },
+            "minItems": 2,
+            "example": ["https://example.com/video1.mp4", "https://example.com/video2.mp4"]
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      },
+      "AnimatedTextRequest": {
+        "type": "object",
+        "required": ["video_url", "text"],
+        "properties": {
+          "video_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/video.mp4"
+          },
+          "text": {
+            "type": "string",
+            "example": "¡Texto animado!"
+          },
+          "animation": {
+            "type": "string",
+            "enum": ["fade", "slide", "zoom", "typewriter", "bounce"],
+            "default": "fade",
+            "example": "fade"
+          },
+          "position": {
+            "type": "string",
+            "enum": ["top", "bottom", "center"],
+            "default": "bottom",
+            "example": "bottom"
+          },
+          "font": {
+            "type": "string",
+            "default": "Arial",
+            "example": "Arial"
+          },
+          "font_size": {
+            "type": "integer",
+            "minimum": 12,
+            "maximum": 120,
+            "default": 36,
+            "example": 36
+          },
+          "color": {
+            "type": "string",
+            "default": "white",
+            "example": "white"
+          },
+          "duration": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 20,
+            "default": 3.0,
+            "example": 3.0
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      },
+      "MediaToMp3Request": {
+        "type": "object",
+        "required": ["media_url"],
+        "properties": {
+          "media_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/video.mp4"
+          },
+          "bitrate": {
+            "type": "string",
+            "pattern": "^[0-9]+k$",
+            "default": "192k",
+            "example": "192k"
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      },
+      "MediaTranscribeRequest": {
+        "type": "object",
+        "required": ["media_url"],
+        "properties": {
+          "media_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/video.mp4"
+          },
+          "language": {
+            "type": "string",
+            "default": "auto",
+            "example": "es"
+          },
+          "output_format": {
+            "type": "string",
+            "enum": ["txt", "srt", "vtt", "json"],
+            "default": "txt",
+            "example": "srt"
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      },
+      "FfmpegComposeRequest": {
+        "type": "object",
+        "required": ["inputs", "filter_complex"],
+        "properties": {
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "format": "uri"
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": ["url"]
+            },
+            "minItems": 1,
+            "example": [
+              {
+                "url": "https://example.com/input1.mp4"
+              },
+              {
+                "url": "https://example.com/overlay.png",
+                "options": ["-loop", "1"]
+              }
+            ]
+          },
+          "filter_complex": {
+            "type": "string",
+            "example": "[0:v][1:v]overlay=10:10:enable='between(t,1,5)'[out]"
+          },
+          "output_options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": ["-map", "[out]", "-map", "0:a", "-c:a", "copy"]
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      },
+      "ImageToVideoRequest": {
+        "type": "object",
+        "required": ["image_url", "duration"],
+        "properties": {
+          "image_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://example.com/image.jpg"
+          },
+          "duration": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 60,
+            "example": 5
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 3840,
+            "example": 1280
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 100,
+            "maximum": 2160,
+            "example": 720
+          },
+          "webhook_url": {
+            "type": "string",
+            "format": "uri",
+            "example": "https://webhook.example.com/callback"
+          },
+          "id": {
+            "type": "string",
+            "example": "custom-job-id-123"
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "Información de la API",
+        "description": "Devuelve información general sobre la API",
+        "security": [],
+        "tags": ["General"],
+        "responses": {
+          "200": {
+            "description": "Información general de la API",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "service": {
+                      "type": "string",
+                      "example": "Video Processing API"
+                    },
+                    "status": {
+                      "type": "string",
+                      "example": "operational"
+                    },
+                    "endpoints": {
+                      "type": "object"
+                    },
+                    "version": {
+                      "type": "string",
+                      "example": "1.0.0"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "Estado de salud del servicio",
+        "description": "Verifica el estado de salud de todos los componentes del servicio",
+        "security": [],
+        "tags": ["Monitoring"],
+        "responses": {
+          "200": {
+            "description": "Estado de salud del servicio",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Servicio no disponible",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "summary": "Información de versión",
+        "description": "Devuelve información detallada sobre la versión de la API",
+        "security": [],
+        "tags": ["General"],
+        "responses": {
+          "200": {
+            "description": "Información de versión",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Métricas del sistema",
+        "description": "Devuelve métricas detalladas del sistema y la API",
+        "tags": ["Monitoring"],
+        "responses": {
+          "200": {
+            "description": "Métricas del sistema",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/maintenance/cleanup": {
+      "post": {
+        "summary": "Limpieza manual",
+        "description": "Inicia manualmente la limpieza de archivos antiguos",
+        "tags": ["Maintenance"],
+        "responses": {
+          "200": {
+            "description": "Resultado de la limpieza",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CleanupResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{job_id}": {
+      "get": {
+        "summary": "Estado de un trabajo",
+        "description": "Consulta el estado de un trabajo específico",
+        "tags": ["Jobs"],
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ID del trabajo a consultar"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Estado del trabajo",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Trabajo no encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/storage/{filename}": {
+      "get": {
+        "summary": "Descarga de archivo",
+        "description": "Descarga un archivo del almacenamiento",
+        "security": [],
+        "tags": ["Storage"],
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Nombre del archivo a descargar"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Archivo",
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "audio/mp3": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Acceso no autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Archivo no encontrado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/video/meme_overlay": {
+      "post": {
+        "summary": "Superponer meme en video",
+        "description": "Superpone una imagen de meme sobre un video",
+        "tags": ["Video"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemeOverlayRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito (procesamiento inmediato)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "success"
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "example": "550e8400-e29b-41d4-a716-446655440000"
+                    },
+                    "result": {
+                      "type": "string",
+                      "example": "https://videoapi.sofe.site/storage/abc123.mp4"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "example": "/v1/video/meme_overlay"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/video/caption_video": {
+      "post": {
+        "summary": "Añadir subtítulos a video",
+        "description": "Añade subtítulos a un video desde un archivo SRT, VTT, etc.",
+        "tags": ["Video"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptionVideoRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito (procesamiento inmediato)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "success"
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "example": "550e8400-e29b-41d4-a716-446655440000"
+                    },
+                    "result": {
+                      "type": "string",
+                      "example": "https://videoapi.sofe.site/storage/abc123.mp4"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "example": "/v1/video/caption_video"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/video/concatenate": {
+      "post": {
+        "summary": "Concatenar videos",
+        "description": "Concatena múltiples videos en uno solo",
+        "tags": ["Video"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConcatenateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito (procesamiento inmediato)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "success"
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "example": "550e8400-e29b-41d4-a716-446655440000"
+                    },
+                    "result": {
+                      "type": "string",
+                      "example": "https://videoapi.sofe.site/storage/abc123.mp4"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "example": "/v1/video/concatenate"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/video/animated_text": {
+      "post": {
+        "summary": "Añadir texto animado",
+        "description": "Añade texto animado a un video",
+        "tags": ["Video"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnimatedTextRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito (procesamiento inmediato)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "success"
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "example": "550e8400-e29b-41d4-a716-446655440000"
+                    },
+                    "result": {
+                      "type": "string",
+                      "example": "https://videoapi.sofe.site/storage/abc123.mp4"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "example": "/v1/video/animated_text"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/transform/media_to_mp3": {
+      "post": {
+        "summary": "Convertir a MP3",
+        "description": "Extrae el audio de un archivo multimedia y lo convierte a MP3",
+        "tags": ["Media"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaToMp3Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito (procesamiento inmediato)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "success"
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "example": "550e8400-e29b-41d4-a716-446655440000"
+                    },
+                    "result": {
+                      "type": "string",
+                      "example": "https://videoapi.sofe.site/storage/abc123.mp3"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "example": "/v1/media/transform/media_to_mp3"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/media/media_transcribe": {
+      "post": {
+        "summary": "Transcribir medio",
+        "description": "Transcribe un archivo de audio o video a texto",
+        "tags": ["Media"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MediaTranscribeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "transcription": {
+                      "type": "string",
+                      "example": "Este es el texto transcrito del audio..."
+                    },
+                    "language_detected": {
+                      "type": "string",
+                      "example": "es"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/ffmpeg/ffmpeg_compose": {
+      "post": {
+        "summary": "Composición FFmpeg",
+        "description": "Procesa archivos multimedia usando comandos FFmpeg personalizados",
+        "tags": ["FFmpeg"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FfmpegComposeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito (procesamiento inmediato)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "success"
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "example": "550e8400-e29b-41d4-a716-446655440000"
+                    },
+                    "result": {
+                      "type": "string",
+                      "example": "https://videoapi.sofe.site/storage/abc123.mp4"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "example": "/v1/ffmpeg/ffmpeg_compose"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "408": {
+            "description": "Timeout - operación demasiado larga",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/image/transform/image_to_video": {
+      "post": {
+        "summary": "Imagen a video",
+        "description": "Convierte una imagen estática en un video con duración especificada",
+        "tags": ["Image"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageToVideoRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Operación completada con éxito (procesamiento inmediato)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "success"
+                    },
+                    "job_id": {
+                      "type": "string",
+                      "example": "550e8400-e29b-41d4-a716-446655440000"
+                    },
+                    "result": {
+                      "type": "string",
+                      "example": "https://videoapi.sofe.site/storage/abc123.mp4"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "example": "/v1/image/transform/image_to_video"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "Trabajo encolado para procesamiento",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Solicitud inválida",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No autorizado",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Error del servidor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
